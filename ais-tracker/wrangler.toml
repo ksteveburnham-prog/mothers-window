@@ -1,0 +1,16 @@
+# A separate Cloudflare Worker, deployed independently from the Pages
+# project. This exists only because Cloudflare Pages cannot host a Durable
+# Object itself — the Durable Object has to live in a real Worker, which the
+# Pages project then binds to. See ../wrangler.toml for that binding.
+
+name = "mothers-window-ais-tracker"
+main = "src/worker.js"
+compatibility_date = "2026-07-25"
+
+[[durable_objects.bindings]]
+name = "AIS_TRACKER"
+class_name = "AisTracker"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["AisTracker"]

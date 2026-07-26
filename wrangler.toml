@@ -1,0 +1,14 @@
+# Configuration for the Cloudflare Pages project itself. This project still
+# has no build step — this file only declares the binding that lets our
+# Pages Functions talk to the AisTracker Durable Object, which lives in the
+# separate ais-tracker/ Worker (Cloudflare Pages cannot host a Durable Object
+# directly).
+
+name = "mothers-window"
+pages_build_output_dir = "."
+compatibility_date = "2026-07-25"
+
+[[durable_objects.bindings]]
+name = "AIS_TRACKER"
+class_name = "AisTracker"
+script_name = "mothers-window-ais-tracker"

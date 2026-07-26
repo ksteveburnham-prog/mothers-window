@@ -1,0 +1,8 @@
+.dev.vars
+.wrangler/
+.DS_Store
+
+# Claude Code's own local tool config — not project source, and has
+# contained real secrets embedded in permission rules (e.g. the WSDOT
+# access code). Never commit this.
+.claude/

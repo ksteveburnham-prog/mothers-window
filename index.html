@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Puget Sound traffic</title>
+<script src="config.js"></script>
+<style>
+  body {
+    margin: 0;
+    padding: 24px;
+    background: #ffffff;
+    color: #111111;
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+  }
+
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 4px 0;
+  }
+
+  .caption {
+    color: #666666;
+    font-size: 13px;
+    margin: 0 0 20px 0;
+  }
+
+  #map {
+    width: 100%;
+    max-width: 960px;
+    height: auto;
+    display: block;
+    background: #f4f7fb;
+    border: 1px solid #d7dee6;
+    border-radius: 6px;
+  }
+
+  .sector-wedge {
+    fill: #bcdcf5;
+    fill-opacity: 0.45;
+    stroke: none;
+  }
+
+  .range-ring {
+    fill: none;
+    stroke: #aab4bf;
+    stroke-dasharray: 3 4;
+  }
+
+  .range-label {
+    fill: #7a8794;
+    font-size: 11px;
+  }
+
+  .home-marker {
+    fill: #111111;
+  }
+
+  .home-label {
+    fill: #111111;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .vessel-label {
+    fill: #222222;
+    font-size: 11px;
+  }
+
+  #legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 14px 0 24px 0;
+    font-size: 13px;
+    color: #333333;
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  #vessel-list {
+    border-top: 2px solid #222222;
+    padding-top: 12px;
+  }
+
+  .vessel-row {
+    padding: 10px 0;
+    border-bottom: 1px solid #e4e8ec;
+  }
+
+  .vessel-row.dimmed {
+    opacity: 0.5;
+  }
+
+  .vessel-name {
+    font-size: 17px;
+    font-weight: 400;
+    margin: 0 0 2px 0;
+  }
+
+  .vessel-row.visible .vessel-name {
+    font-weight: 700;
+  }
+
+  .vessel-detail {
+    margin: 0;
+    color: #333333;
+    font-size: 14px;
+  }
+
+  .empty {
+    font-size: 16px;
+    color: #333333;
+  }
+
+  .updated {
+    margin-top: 20px;
+    color: #888888;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+  <h1>Puget Sound traffic from the window</h1>
+  <p class="caption">
+    Schematic, not a real chart — positions, distances, and angles are
+    computed from live data, but the shoreline isn't drawn. Faded icons are
+    within range but outside her actual sightline (behind trees/buildings).
+  </p>
+
+  <svg id="map" viewBox="0 0 600 580"></svg>
+
+  <div id="legend"></div>
+
+  <div id="vessel-list"></div>
+  <p class="updated" id="updated-line"></p>
+
+  <script>
+  (function () {
+    const REFRESH_MS = 30000;
+    const FETCH_TIMEOUT_MS = 15000;
+    const EARTH_RADIUS_MILES = 3958.8;
+    const MILES_PER_DEGREE_LAT = 69.0;
+
+    // Screen projection for the schematic map. Her window is a fixed anchor
+    // point, placed near the upper-right corner of a frame sized to fit only
+    // the region her two sectors actually cover (bearings roughly 226-285
+    // deg out to maxDistanceMiles) — not a full circle around her, most of
+    // which would never show anything, since she can only ever see traffic
+    // in that one ~60 deg slice to her south/west.
+    const MAP_ANCHOR_X = 570;
+    const MAP_ANCHOR_Y = 170;
+    const PIXELS_PER_MILE = 55;
+
+    const CATEGORY_SHAPES = {
+      ferry: '<polygon points="-7,-9 7,-9 7,9 -7,9"></polygon>',
+      passenger: '<polygon points="-6,-9 6,-9 6,5 0,10 -6,5"></polygon>',
+      cargo: '<polygon points="0,-11 5,4 0,1 -5,4"></polygon>',
+      tanker: '<ellipse cx="0" cy="0" rx="6" ry="10"></ellipse>',
+      tug: '<polygon points="-5,-5 5,-5 5,5 -5,5"></polygon>',
+      fishing: '<polygon points="0,-7 5,6 -5,6"></polygon>',
+      military: '<polygon points="0,-10 6,-2 4,8 -4,8 -6,-2"></polygon>',
+      pleasure: '<polygon points="0,-8 3,6 -3,6"></polygon>',
+      service: '<polygon points="0,-8 6,0 0,8 -6,0"></polygon>',
+      other: '<circle cx="0" cy="0" r="6"></circle>'
+    };
+
+    const CATEGORY_COLORS = {
+      ferry: '#1d4ed8',
+      passenger: '#7c3aed',
+      cargo: '#b45309',
+      tanker: '#b91c1c',
+      tug: '#0f766e',
+      fishing: '#15803d',
+      military: '#374151',
+      pleasure: '#db2777',
+      service: '#ca8a04',
+      other: '#6b7280'
+    };
+
+    const CATEGORY_LABELS = {
+      ferry: 'Washington State Ferry',
+      passenger: 'Passenger vessel',
+      cargo: 'Cargo ship',
+      tanker: 'Tanker',
+      tug: 'Tug / towing',
+      fishing: 'Fishing vessel',
+      military: 'Military (rarely broadcasts AIS)',
+      pleasure: 'Pleasure / sailing craft',
+      service: 'Pilot, search-and-rescue, or other service vessel',
+      other: 'Unknown / other'
+    };
+
+    const mapEl = document.getElementById('map');
+    const legendEl = document.getElementById('legend');
+    const listEl = document.getElementById('vessel-list');
+    const updatedEl = document.getElementById('updated-line');
+
+    // Cached raw responses, so a failed fetch from one source never blanks
+    // out data we already have from that source — same resilience rule as
+    // the rest of this project.
+    let lastFerriesRaw = [];
+    let lastVesselsRaw = [];
+
+    function toRadians(deg) { return (deg * Math.PI) / 180; }
+    function toDegrees(rad) { return (rad * 180) / Math.PI; }
+
+    function bearingTo(lat1, lon1, lat2, lon2) {
+      const phi1 = toRadians(lat1);
+      const phi2 = toRadians(lat2);
+      const deltaLambda = toRadians(lon2 - lon1);
+
+      const y = Math.sin(deltaLambda) * Math.cos(phi2);
+      const x =
+        Math.cos(phi1) * Math.sin(phi2) -
+        Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
+
+      return (toDegrees(Math.atan2(y, x)) + 360) % 360;
+    }
+
+    function distanceMiles(lat1, lon1, lat2, lon2) {
+      const phi1 = toRadians(lat1);
+      const phi2 = toRadians(lat2);
+      const deltaPhi = toRadians(lat2 - lat1);
+      const deltaLambda = toRadians(lon2 - lon1);
+
+      const a =
+        Math.sin(deltaPhi / 2) ** 2 +
+        Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+      return EARTH_RADIUS_MILES * c;
+    }
+
+    // Same sector-membership test as the original ferry page: true if this
+    // bearing falls in EITHER sector, widened by the measured compass
+    // uncertainty. Reused here for every vessel, ferry or not, to decide
+    // whether it renders full-strength or dimmed on the map/list.
+    function isVisible(bearing) {
+      return WINDOW.sectors.some(function (sector) {
+        return (
+          bearing >= sector.from - WINDOW.bearingTolerance &&
+          bearing <= sector.to + WINDOW.bearingTolerance
+        );
+      });
+    }
+
+    function shipTypeToCategory(code) {
+      if (code === undefined || code === null) return 'other';
+      if (code === 30) return 'fishing';
+      if (code === 31 || code === 32 || code === 52) return 'tug';
+      if (code === 35) return 'military';
+      if (code === 36 || code === 37) return 'pleasure';
+      if (code >= 50 && code <= 59) return 'service';
+      if (code >= 60 && code <= 69) return 'passenger';
+      if (code >= 70 && code <= 79) return 'cargo';
+      if (code >= 80 && code <= 89) return 'tanker';
+      return 'other';
+    }
+
+    function formatHeading(v) {
+      const h = (v.heading !== undefined && v.heading !== null && v.heading < 511)
+        ? v.heading
+        : v.course;
+      if (h === undefined || h === null) return 'heading unknown';
+      return Math.round(h) + '°';
+    }
+
+    function formatSpeed(knots) {
+      if (knots === undefined || knots === null) return 'speed unknown';
+      return knots.toFixed(1) + ' kn';
+    }
+
+    function formatSize(lengthMeters, beamMeters) {
+      if (!lengthMeters) return null;
+      const lengthFt = Math.round(lengthMeters * 3.281);
+      if (!beamMeters) return lengthFt + ' ft';
+      const beamFt = Math.round(beamMeters * 3.281);
+      return lengthFt + ' × ' + beamFt + ' ft';
+    }
+
+    function describeDistance(miles) {
+      if (miles < 1) return 'less than a mile out';
+      const rounded = Math.round(miles);
+      return rounded + (rounded === 1 ? ' mile out' : ' miles out');
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, function (ch) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+      });
+    }
+
+    function normalizeFerry(v, distance, bearing) {
+      let subtitle = '';
+      if (v.DepartingTerminalName && v.ArrivingTerminalName) {
+        subtitle = v.DepartingTerminalName.trim() + ' → ' + v.ArrivingTerminalName.trim();
+      } else if (v.AtDock) {
+        subtitle = 'At dock';
+      }
+      return {
+        id: 'ferry-' + v.VesselID,
+        category: 'ferry',
+        name: v.VesselName,
+        subtitle: subtitle,
+        heading: v.Heading,
+        course: null,
+        speedKnots: v.Speed,
+        lengthMeters: null,
+        beamMeters: null,
+        distance: distance,
+        bearing: bearing,
+        lat: v.Latitude,
+        lon: v.Longitude
+      };
+    }
+
+    function normalizeAisVessel(v, distance, bearing) {
+      return {
+        id: 'ais-' + v.mmsi,
+        category: shipTypeToCategory(v.shipType),
+        name: v.name || ('Unknown vessel (MMSI ' + v.mmsi + ')'),
+        subtitle: v.destination ? ('To ' + v.destination) : (v.callSign || ''),
+        heading: v.heading,
+        course: v.course,
+        speedKnots: v.speedKnots,
+        lengthMeters: v.lengthMeters,
+        beamMeters: v.beamMeters,
+        distance: distance,
+        bearing: bearing,
+        lat: v.lat,
+        lon: v.lon
+      };
+    }
+
+    async function fetchJson(url) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(function () { controller.abort(); }, FETCH_TIMEOUT_MS);
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error('bad response from ' + url);
+        const data = await response.json();
+        if (!Array.isArray(data)) throw new Error('unexpected response shape from ' + url);
+        return data;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    function polarPoint(bearingDeg, radiusPx) {
+      const rad = toRadians(bearingDeg);
+      return {
+        x: MAP_ANCHOR_X + radiusPx * Math.sin(rad),
+        y: MAP_ANCHOR_Y - radiusPx * Math.cos(rad)
+      };
+    }
+
+    function project(lat, lon) {
+      const northMiles = (lat - WINDOW.lat) * MILES_PER_DEGREE_LAT;
+      const eastMiles = (lon - WINDOW.lon) * MILES_PER_DEGREE_LAT * Math.cos(toRadians(WINDOW.lat));
+      return {
+        x: MAP_ANCHOR_X + eastMiles * PIXELS_PER_MILE,
+        y: MAP_ANCHOR_Y - northMiles * PIXELS_PER_MILE
+      };
+    }
+
+    function sectorWedgeSvg() {
+      const radiusPx = WINDOW.maxDistanceMiles * PIXELS_PER_MILE;
+      return WINDOW.sectors.map(function (sector) {
+        const fromAngle = sector.from - WINDOW.bearingTolerance;
+        const toAngle = sector.to + WINDOW.bearingTolerance;
+        const p1 = polarPoint(fromAngle, radiusPx);
+        const p2 = polarPoint(toAngle, radiusPx);
+        const d = 'M ' + MAP_ANCHOR_X + ' ' + MAP_ANCHOR_Y +
+          ' L ' + p1.x + ' ' + p1.y +
+          ' A ' + radiusPx + ' ' + radiusPx + ' 0 0 1 ' + p2.x + ' ' + p2.y +
+          ' Z';
+        return '<path d="' + d + '" class="sector-wedge"></path>';
+      }).join('');
+    }
+
+    function rangeRingsSvg() {
+      return [WINDOW.maxDistanceMiles / 2, WINDOW.maxDistanceMiles].map(function (miles) {
+        const r = miles * PIXELS_PER_MILE;
+        return '<circle cx="' + MAP_ANCHOR_X + '" cy="' + MAP_ANCHOR_Y + '" r="' + r + '" class="range-ring"></circle>' +
+          '<text x="' + (MAP_ANCHOR_X + 4) + '" y="' + (MAP_ANCHOR_Y - r + 12) + '" class="range-label">' + miles + ' mi</text>';
+      }).join('');
+    }
+
+    function anchorSvg() {
+      // Text-anchor "end" and placed to the left of the point, since the
+      // anchor sits close to the frame's right edge — a label placed to the
+      // right would get clipped by the viewBox.
+      return '<circle cx="' + MAP_ANCHOR_X + '" cy="' + MAP_ANCHOR_Y + '" r="5" class="home-marker"></circle>' +
+        '<text x="' + (MAP_ANCHOR_X - 8) + '" y="' + (MAP_ANCHOR_Y + 4) + '" text-anchor="end" class="home-label">Your window</text>';
+    }
+
+    function vesselMarkerSvg(v) {
+      const point = project(v.lat, v.lon);
+      const visible = isVisible(v.bearing);
+      const heading = (v.heading !== undefined && v.heading !== null && v.heading < 511)
+        ? v.heading
+        : (v.course !== undefined && v.course !== null ? v.course : 0);
+      const shape = CATEGORY_SHAPES[v.category] || CATEGORY_SHAPES.other;
+      const color = CATEGORY_COLORS[v.category] || CATEGORY_COLORS.other;
+      const opacity = visible ? '1' : '0.35';
+
+      return '<g transform="translate(' + point.x + ',' + point.y + ') rotate(' + heading + ')" fill="' + color + '" opacity="' + opacity + '">' +
+        shape +
+        '</g>' +
+        '<text x="' + (point.x + 9) + '" y="' + (point.y + 4) + '" class="vessel-label" opacity="' + opacity + '">' +
+        escapeHtml(v.name) +
+        '</text>';
+    }
+
+    function renderLegend() {
+      legendEl.innerHTML = Object.keys(CATEGORY_LABELS).map(function (key) {
+        return '<span class="legend-item">' +
+          '<svg width="16" height="16" viewBox="-9 -9 18 18" fill="' + CATEGORY_COLORS[key] + '">' + CATEGORY_SHAPES[key] + '</svg>' +
+          '<span>' + CATEGORY_LABELS[key] + '</span>' +
+          '</span>';
+      }).join('');
+    }
+
+    function renderMap(vessels) {
+      const parts = [sectorWedgeSvg(), rangeRingsSvg(), anchorSvg()];
+      vessels.forEach(function (v) { parts.push(vesselMarkerSvg(v)); });
+      mapEl.innerHTML = parts.join('');
+    }
+
+    function renderList(vessels) {
+      listEl.innerHTML = '';
+
+      if (vessels.length === 0) {
+        const p = document.createElement('p');
+        p.className = 'empty';
+        p.textContent = 'Nothing in view right now.';
+        listEl.appendChild(p);
+        return;
+      }
+
+      vessels.forEach(function (v) {
+        const row = document.createElement('div');
+        row.className = 'vessel-row' + (isVisible(v.bearing) ? ' visible' : ' dimmed');
+
+        const name = document.createElement('p');
+        name.className = 'vessel-name';
+        name.textContent = v.name + ' — ' + (CATEGORY_LABELS[v.category] || 'Unknown');
+        row.appendChild(name);
+
+        const bits = [];
+        if (v.subtitle) bits.push(v.subtitle);
+        bits.push(describeDistance(v.distance));
+        bits.push(formatHeading(v));
+        bits.push(formatSpeed(v.speedKnots));
+        const size = formatSize(v.lengthMeters, v.beamMeters);
+        if (size) bits.push(size);
+
+        const detail = document.createElement('p');
+        detail.className = 'vessel-detail';
+        detail.textContent = bits.join(' · ');
+        row.appendChild(detail);
+
+        listEl.appendChild(row);
+      });
+    }
+
+    function render(vessels) {
+      renderMap(vessels);
+      renderList(vessels);
+    }
+
+    function formatTime(date) {
+      return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    }
+
+    async function poll() {
+      const [ferriesResult, vesselsResult] = await Promise.allSettled([
+        fetchJson('/api/ferries'),
+        fetchJson('/api/vessels')
+      ]);
+
+      let anySucceeded = false;
+
+      if (ferriesResult.status === 'fulfilled') {
+        lastFerriesRaw = ferriesResult.value;
+        anySucceeded = true;
+      } else {
+        console.error('Ferry fetch failed, keeping last known ferries on screen:', ferriesResult.reason);
+      }
+
+      if (vesselsResult.status === 'fulfilled') {
+        lastVesselsRaw = vesselsResult.value;
+        anySucceeded = true;
+      } else {
+        console.error('AIS fetch failed, keeping last known vessels on screen:', vesselsResult.reason);
+      }
+
+      const combined = [];
+
+      // Ferries broadcast AIS themselves (confirmed with real data — WSDOT's
+      // own vessel records include an Mmsi field, and the same MMSI shows up
+      // in the AIS feed as "WSF <name>"). Without this, every ferry would be
+      // listed twice: once from WSDOT with route detail, once from AIS as a
+      // generic passenger vessel.
+      const ferryMmsis = new Set();
+      lastFerriesRaw.forEach(function (v) {
+        if (v.Mmsi) ferryMmsis.add(v.Mmsi);
+      });
+
+      lastFerriesRaw.forEach(function (v) {
+        if (!v.InService) return;
+        const bearing = bearingTo(WINDOW.lat, WINDOW.lon, v.Latitude, v.Longitude);
+        const distance = distanceMiles(WINDOW.lat, WINDOW.lon, v.Latitude, v.Longitude);
+        if (distance > WINDOW.maxDistanceMiles) return;
+        combined.push(normalizeFerry(v, distance, bearing));
+      });
+
+      lastVesselsRaw.forEach(function (v) {
+        if (v.lat === undefined || v.lon === undefined) return;
+        if (ferryMmsis.has(v.mmsi)) return;
+        const bearing = bearingTo(WINDOW.lat, WINDOW.lon, v.lat, v.lon);
+        const distance = distanceMiles(WINDOW.lat, WINDOW.lon, v.lat, v.lon);
+        if (distance > WINDOW.maxDistanceMiles) return;
+        combined.push(normalizeAisVessel(v, distance, bearing));
+      });
+
+      // Vessels actually in her sightline float to the top of the list,
+      // ahead of ones that are merely nearby but obstructed; distance breaks
+      // ties within each group.
+      combined.sort(function (a, b) {
+        const aVisible = isVisible(a.bearing);
+        const bVisible = isVisible(b.bearing);
+        if (aVisible !== bVisible) return aVisible ? -1 : 1;
+        return a.distance - b.distance;
+      });
+
+      render(combined);
+      if (anySucceeded) {
+        updatedEl.textContent = 'Updated at ' + formatTime(new Date());
+      }
+
+      scheduleNextPoll();
+    }
+
+    function scheduleNextPoll() {
+      setTimeout(poll, REFRESH_MS);
+    }
+
+    renderLegend();
+    poll();
+  })();
+  </script>
+
+</body>
+</html>
