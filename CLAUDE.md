@@ -71,6 +71,13 @@ Cloudflare Pages settings: no build command, build output directory `/`. The
 separately (`wrangler deploy` run from inside that folder) — it is not part
 of the Pages build in any way.
 
+**Live URLs** (both real, deployed 2026-07-25):
+- Pages: `https://lumen-copper-39d6ac.pages.dev`
+- ais-tracker Worker: `https://mothers-window-ais-tracker.ksteveburnham.workers.dev`
+  (kept its literal name deliberately — it only serves anonymous AIS vessel
+  JSON, no coordinates, so the naming tradeoff that matters for the Pages
+  project doesn't apply here the same way)
+
 ## Hard constraints
 
 1. **No build step.** No npm install, no bundler, no framework, no
@@ -118,6 +125,41 @@ Simpler alternative for the Pages side alone: push to a branch and use the
 Cloudflare preview deployment. The `ais-tracker` Worker still needs its own
 independent deploy either way — there's no bundled equivalent of the Pages
 preview for it.
+
+## Deploying
+
+**There is no git-push auto-deploy, deliberately, after trying it twice.**
+Git integration for the Pages project hit two separate Cloudflare platform
+issues in a row: (1) the default deploy command it picks is `wrangler
+deploy`, which is the *Workers* command and fails on a Pages project — it
+has to be manually overridden to `npx wrangler pages deploy .`; (2) even
+with that fixed, Cloudflare's build environment auto-injects its own
+`CLOUDFLARE_API_TOKEN` for the deploy command to use, and that token lacks
+permission to actually deploy Pages projects, so every build fails with
+`Authentication error [code: 10000]`. A real fix exists (create a
+Pages-scoped API token yourself and add it as a build environment variable
+to override the broken one), but wasn't worth chasing further — manual
+deploy already works reliably. **If the GitHub repo currently has Git
+integration connected in the Cloudflare dashboard, every push will trigger
+a failing build until that's disconnected** (Settings → Builds & deployments
+→ disconnect) — worth doing to stop the noise, even though it doesn't
+affect the live site (which only updates on manual deploy anyway).
+
+Publishing an update, in order:
+
+1. Commit and push to GitHub as usual (for history — this does **not**
+   trigger a deploy).
+2. If `ais-tracker/src/worker.js` or `ais-tracker/wrangler.toml` changed:
+   `cd ais-tracker && npx wrangler deploy`.
+3. Deploy the Pages project: `npx wrangler pages deploy .` from the repo
+   root.
+4. If a secret changed: `npx wrangler secret put AISSTREAM_API_KEY` (from
+   `ais-tracker/`) or `npx wrangler pages secret put WSDOT_ACCESS_CODE
+   --project-name=lumen-copper-39d6ac` (from the repo root).
+
+Both `wrangler login` (once, already done) and these deploy commands need
+to run from an authenticated Cloudflare session — `npx wrangler whoami`
+confirms which account is active before deploying anything.
 
 ## Design rules (current: technical dashboard, not mom-facing)
 
