@@ -4,7 +4,7 @@
 # separate ais-tracker/ Worker (Cloudflare Pages cannot host a Durable Object
 # directly).
 
-name = "mothers-window"
+name = "lumen-copper-39d6ac"
 pages_build_output_dir = "."
 compatibility_date = "2026-07-25"
 

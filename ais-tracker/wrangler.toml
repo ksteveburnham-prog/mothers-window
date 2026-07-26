@@ -13,4 +13,4 @@ class_name = "AisTracker"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["AisTracker"]
+new_sqlite_classes = ["AisTracker"]
